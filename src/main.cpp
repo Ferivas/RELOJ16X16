@@ -375,6 +375,24 @@ timerAlarmEnable(timer);                            // Activar la alarma
     getntptime();
 }
 
+// Debounce no bloqueante: devuelve true una sola vez por pulsación
+// estable (nivel LOW durante BTN_DEBOUNCE_MS). Así un rebote mecánico
+// nunca genera múltiples cambios ni múltiples escrituras a flash.
+static const unsigned long BTN_DEBOUNCE_MS = 50;
+static bool boton_pulsado(int pin, int &estable, unsigned long &t_cambio) {
+    int s = digitalRead(pin);
+    unsigned long ahora = millis();
+    if (s != estable) {
+        if (ahora - t_cambio >= BTN_DEBOUNCE_MS) {
+            estable = s;
+            return (s == 0);
+        }
+    } else {
+        t_cambio = ahora;
+    }
+    return false;
+}
+
 void loop() {
     static unsigned long INTERVALO_NTP_SEG = (unsigned long)config.n_horas * 3600UL + 30UL;
     static time_t ultimo_ntp_tick = time(nullptr);
@@ -382,7 +400,10 @@ void loop() {
     static int dhoraant = 99, uhoraant = 99, dminant = 99, uminant = 99;
     static bool newd = false;
     static int tled = 0;
-    static int btn_fuente_prev = 1, btn_brillo_prev = 1;
+    static int btn_f_estable = 1, btn_b_estable = 1;
+    static unsigned long btn_f_tcamp = 0, btn_b_tcamp = 0;
+    static bool config_sucia = false;
+    static unsigned long t_config_sucia = 0;
 
     static const unsigned long ANIM_FRAME_TIME = 200;
     static bool is_animating = false;
@@ -403,26 +424,32 @@ void loop() {
         if (tick == 0) newdig = true;
     }
 
-    // --- LECTURA DE BOTÓN FUENTE ---
-    int btn_f_state = digitalRead(config.pin_fuente);
-    if (btn_f_state == 0 && btn_fuente_prev == 1) {
+    // --- BOTONES con debounce no bloqueante (un disparo por pulsación) ---
+    if (boton_pulsado(config.pin_fuente, btn_f_estable, btn_f_tcamp)) {
         fuente_actual = (fuente_actual + 1) % NUM_FUENTES;
         config.fuente_actual = fuente_actual;
-        guardar_config();
+        config_sucia = true;
+        t_config_sucia = millis();
         newd = true;
-        delay(200);
+        Serial.printf("Boton fuente: fuente_actual=%d\n", fuente_actual);
     }
-    btn_fuente_prev = btn_f_state;
 
-    // --- LECTURA DE BOTÓN BRILLO ---
-    int btn_b_state = digitalRead(config.pin_brillo);
-    if (btn_b_state == 0 && btn_brillo_prev == 1) {
+    if (boton_pulsado(config.pin_brillo, btn_b_estable, btn_b_tcamp)) {
         NIVEL_BRILLO = (NIVEL_BRILLO % 3) + 1;
         config.nivel_brillo = NIVEL_BRILLO;
-        guardar_config();
-        delay(200);
+        config_sucia = true;
+        t_config_sucia = millis();
+        Serial.printf("Boton brillo: nivel=%d\n", NIVEL_BRILLO);
     }
-    btn_brillo_prev = btn_b_state;
+
+    // Guardado diferido: una sola escritura a flash aunque haya varias
+    // pulsaciones seguidas. Cada escritura puede pausar el barrido del
+    // display unos ms (columna fija = destello), así que se hace una vez
+    // y 1.5 s después de la última pulsación, no durante ella.
+    if (config_sucia && millis() - t_config_sucia >= 1500) {
+        config_sucia = false;
+        guardar_config();
+    }
 
     unsigned long current_tick_ms = millis();
 
@@ -514,10 +541,14 @@ void loop() {
                 dhoraant = curr_dhora; uhoraant = curr_uhora;
                 dminant = curr_dmin;   uminant = curr_umin;
                 newd = false;
+                // Pausar el barrido durante el redibujado para que la ISR
+                // no lea buffram a medio actualizar (unos us, invisible).
+                timerAlarmDisable(timer);
                 gendig(curr_dhora, 3);
                 gendig(curr_uhora, 2);
                 gendig(curr_dmin, 1);
                 gendig(curr_umin, 0);
+                timerAlarmEnable(timer);
             }
         }
     }
