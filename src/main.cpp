@@ -2,7 +2,7 @@
 // Conserva: multiplexado por timer de 2 ms con SPI HW, 3 fuentes, animación
 // de cambio de minuto, 3 niveles de brillo, botones con config persistente
 // (config.json en LittleFS), sincronización NTP periódica (N horas + 30 s),
-// parpadeo de dos puntos y parpadeo de indicador en modo AP.
+// parpadeo de dos puntos e icono WiFi parpadeante en matriz 0 si no hay red.
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -92,6 +92,16 @@ static volatile int NIVEL_BRILLO = 3;
 static int ptrcol = 0;
 static volatile bool interruptCounter = false;
 static int ap_blink_counter = 0;
+static bool wifi_icon_on = false;
+
+// Icono "sin WiFi" 8x8 para la matriz 0 (column-major: cada byte es una
+// columna, bit 0 = fila superior). Punto inferior + 2 arcos:
+//   .######.  #......#  .##..##.  ...##...  ...##...  ...##... (punto)
+static const uint8_t ICONO_WIFI[8] = {
+    0b00000100, 0b00001010, 0b00001010, 0b10110010,
+    0b10110010, 0b00001010, 0b00001010, 0b00000100
+};
+#define ICONO_WIFI_LEN 8
 
 static SPIClass *spi = nullptr;
 static hw_timer_t *timer = nullptr;
@@ -139,17 +149,15 @@ void IRAM_ATTR handleInterrupt() {
     ptrcol = (ptrcol + 1) & 7;
     interruptCounter = true;
 
-    // Parpadeo del indicador en modo AP (sin cambios)
+    // Icono "sin WiFi" parpadeante en la matriz 0 (bytes 0..7) a ~1 s.
+    // Solo activo mientras no hay conexión (modo portal AP).
     if (!flaginternet) {
         ap_blink_counter++;
-        if (ap_blink_counter >= 250) {
+        if (ap_blink_counter >= 500) {  // 500 ticks x 2 ms = 1 s
             ap_blink_counter = 0;
-            if (buffram[30] == 0) {
-                buffram[30] = 0b01000000;
-                buffram[31] = 0b01000000;
-            } else {
-                buffram[30] = 0;
-                buffram[31] = 0;
+            wifi_icon_on = !wifi_icon_on;
+            for (int i = 0; i < ICONO_WIFI_LEN; i++) {
+                buffram[i] = wifi_icon_on ? ICONO_WIFI[i] : 0x00;
             }
         }
     }
@@ -361,6 +369,9 @@ timerAlarmEnable(timer);                            // Activar la alarma
     }
 
     flaginternet = true;
+    // Limpiar la ventana del icono "sin WiFi" (matriz 0, bytes 0..7) para
+    // que el reloj arranque limpio aunque el icono quedara encendido.
+    for (int i = 0; i < ICONO_WIFI_LEN; i++) buffram[i] = 0;
     getntptime();
 }
 
